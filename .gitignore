@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller 打包產物
+build/
+dist/
+*.spec
+*.exe
+
+# 爬蟲輸出
+*.csv
