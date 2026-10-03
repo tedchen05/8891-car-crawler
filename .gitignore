@@ -12,3 +12,7 @@ dist/
 
 # 爬蟲輸出
 *.csv
+
+# 編輯器
+.vs/
+.vscode/settings.json
