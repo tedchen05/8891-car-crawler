@@ -11,10 +11,14 @@ from selenium.webdriver.chrome.service import Service
 #import pandas as pd
 import time
 
-def get_chrome(url,path=r"C:\Users\user\Desktop\py2\解壓縮檔\chromedriver-win64\chromedriver.exe"):
+def get_chrome(url,path=None,hide=False):
+    #path為None時，由Selenium自動下載對應版本的chromedriver
     service=Service(path)
+    options=webdriver.ChromeOptions()
+    if hide:
+        options.add_argument("--headless=new") #不顯示瀏覽器視窗
     try:
-        chrome=webdriver.Chrome(service=service)
+        chrome=webdriver.Chrome(service=service,options=options)
         chrome.get(url)
         return chrome
     except Exception as e:
@@ -28,7 +32,8 @@ def get_car_pages(url):
     pages=None
     if chrome is not None:        
         soup=BeautifulSoup(chrome.page_source,"lxml")
-        pages=int(soup.find("div",class_="_pages_ivprf_7").find_all("button")[-1].text.strip())
+        items=soup.select("li.ant-pagination-item")
+        pages=int(items[-1].text.strip()) if items else 1
         chrome.quit()
         
     return pages
@@ -43,17 +48,20 @@ def get_car_data(url,q):
     time.sleep(1)
     if chrome is not None:
         soup=BeautifulSoup(chrome.page_source,"lxml")
-        cars=soup.find(id="search-result").find_all("a")        
+        cars=soup.select('a[class*="row-item"]')
         for car in cars:
-            title=car.find("div",class_="ib-info-title").text.strip()            
-            content=car.find("div",class_="ib-info-oldtitle").text.strip()
-            infos=car.find("div",class_="ib-row ib-extra").text.strip().split()
-            price,year,km=infos[0],infos[-2],infos[-1]
-            county=car.find("span",class_="ib-ii-item").text.strip()
-            car_url="https://auto.8891.com.tw/"+car.get("href")
-            image_url=car.find("img").get("data-src")        
+            title=car.select_one('[class*="ib-info-title"]').text.strip()
+            content=car.select_one('[class*="ib-info-oldtitle"]').text.strip()
+            price=car.select_one('[class*="ib-price"]').text.strip()
+            icons=car.select('[class*="ib-icon"]')
+            year,km=icons[0].text.strip(),icons[1].text.strip()
+            county=car.select_one('[class*="ib-ii-item"]').text.strip()
+            car_url="https://auto.8891.com.tw"+car.get("href")
+            img=car.select_one('[class*="ib-image"] img') #圖片為延遲載入，未載入時為空
+            image_url=img.get("data-src") if img else ""
             #print(title,county,content,price,year,km,car_url,image_url,sep="\n")
-            datas.append([title,county,content,price,year,km,car_url,image_url])
+            #順序對應GUI的欄位:標題,縣市,價格,里程,年份,圖片連結,超連結,內文
+            datas.append([title,county,price,km,year,image_url,car_url,content])
             #print("-"*80)   
         chrome.quit()
     else:
