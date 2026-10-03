@@ -16,3 +16,6 @@ dist/
 # 編輯器
 .vs/
 .vscode/settings.json
+
+# 個人筆記
+開發筆記.md

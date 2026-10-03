@@ -4,6 +4,8 @@
 
 > 聯成電腦 Python 課程的練習作品，一年後重新優化的版本。
 
+![介面截圖](images/screenshot.png)
+
 ## 功能
 
 - 視窗介面，照「步驟 1 → 2 → 3」操作，不用寫程式
@@ -125,6 +127,8 @@ VS Code 選到的 Python 沒有安裝套件。照「方法二」重新選擇 Pyt
 ├── gui_thread.py          # 視窗介面（主程式，執行這個）
 ├── car_8891_thread.py     # 爬蟲核心：開啟網頁、解析資料
 ├── requirements.txt       # 需要安裝的套件
+├── images/
+│   └── screenshot.png     # 介面截圖
 └── .vscode/
     ├── launch.json        # VS Code 按 F5 的執行設定
     └── extensions.json    # 建議安裝的 VS Code 擴充功能
