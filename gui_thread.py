@@ -5,128 +5,220 @@ Created on Sun Aug 11 15:16:29 2024
 @author: USER
 """
 
-from car_8891_thread import get_car_pages,get_car_data  
-import pandas as pd
-from threading import Thread
-from queue import Queue
-
-url="https://auto.8891.com.tw/?key={}&page={}"
-q=Queue()
-pages=0
-cars=None
-
-
-def search_car_thread():
-    Thread(target=search_car).start()
-
-
-def search_pages_thread():
-    Thread(target=search_pages).start()
-    
-    
-def search_pages():
-    global pages,cars
-    cars=entry.get()
-    cars_url=url.format(cars,1)
-    button.config(state=tk.DISABLED) #查找中關閉按鈕使用
-    label3.config(text="查找頁數中...")
-    pages=get_car_pages(cars_url)
-    label2.config(text=f"共{pages}頁")
-    label3.config(text="查找完畢")
-    button.config(state=tk.NORMAL) #查找完開啟按鈕使用
-
-    
-    if pages>0:
-        button1.config(state=tk.NORMAL) #開啟按鈕狀態
-        
-def search_car():
-    button.config(state=tk.DISABLED)
-    button1.config(state=tk.DISABLED)
-    datas=[]
-    threads=[]
-    max_page=5
-    
-    for i in range(int(entry1.get()),int(entry2.get())+1):
-        if i%max_page==0:
-            label3.config(text=f"查找第{i-4}~{i}頁中...")
-        else:
-            label3.config(text=f"查找第{i+1-i%max_page}~{i}頁中...")
-        
-        #改成執行緒
-        t=Thread(target=get_car_data,args=(url.format(cars,i),q))
-        threads.append(t)
-        
-        if i%max_page==0:
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-                
-            threads=[]
-    
-    #剩下的頁數
-    
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    for i in range(q.qsize()):
-        data=q.get()
-        if len(data)>0:
-            datas+=data
-            
-        # data=get_car_data(url.format(cars,i))
-        # if len(data)>0:
-        #     datas+=data
-
-        
-    df=pd.DataFrame(datas,columns=["標題","縣市","價格","里程","年份","圖片連結","超連結","內文"])
-    df=df.set_index("標題")
-    df.to_csv(f"8891_{cars}.csv",encoding="utf-8-sig")
-    label3.config(text="檔案儲存完畢")
-    button.config(state=tk.NORMAL)
-
-
+from car_8891_thread import COLUMNS,get_car_data,get_car_pages
+import os
+import subprocess
+import sys
 import tkinter as tk
+from tkinter import messagebox,ttk
+from concurrent.futures import ThreadPoolExecutor,as_completed
+from threading import Thread
+import pandas as pd
 
+MAX_WORKERS=5 #同時爬取的頁數上限
+SAVE_DIR=os.path.join(os.path.expanduser("~"),"Downloads") #CSV存檔資料夾(下載)
+if not os.path.isdir(SAVE_DIR):
+    SAVE_DIR=os.path.expanduser("~") #沒有下載資料夾時存到使用者資料夾
+FONT="微軟正黑體"
+
+cars=""
+save_path=""
+
+
+#在主執行緒更新畫面
+def ui(func,*args,**kwargs):
+    car.after(0,lambda:func(*args,**kwargs))
+
+
+def set_status(text,color="#333333"):
+    ui(status_label.config,text=text,foreground=color)
+
+
+def set_busy(busy):
+    def apply():
+        state=tk.DISABLED if busy else tk.NORMAL
+        search_button.config(state=state)
+        keyword_entry.config(state=state)
+        #有頁數時才能按開始
+        can_start=not busy and pages_var.get()>0
+        start_button.config(state=tk.NORMAL if can_start else tk.DISABLED)
+    ui(apply)
+
+
+# 步驟1：查詢頁數
+def search_pages_thread(event=None):
+    keyword=keyword_entry.get().strip()
+    if not keyword:
+        messagebox.showwarning("提醒","請先輸入要搜尋的車款關鍵字，例如：jimny")
+        return
+    Thread(target=search_pages,args=(keyword,),daemon=True).start()
+
+
+def search_pages(keyword):
+    global cars
+    cars=keyword
+    ui(pages_var.set,0)
+    set_busy(True)
+    ui(progress.config,mode="indeterminate",maximum=100)
+    ui(progress.start,10)
+    set_status(f"正在查詢「{cars}」的總頁數，請稍候...")
+
+    try:
+        pages=get_car_pages(cars)
+    except Exception as e:
+        pages=-1
+        print("查詢失敗:",e)
+
+    ui(progress.stop)
+    ui(progress.config,mode="determinate",value=0)
+    if pages>0:
+        ui(pages_var.set,pages)
+        ui(pages_label.config,text=f"共 {pages} 頁（每頁約 40 筆）",foreground="#1E7E34")
+        #頁數範圍預設為全部頁數
+        ui(start_spin.config,to=pages)
+        ui(end_spin.config,to=pages)
+        ui(start_var.set,1)
+        ui(end_var.set,pages)
+        set_status("查詢完成，請確認頁數範圍後按「開始爬取」","#1E7E34")
+    elif pages==0:
+        ui(pages_label.config,text="查無資料",foreground="#C0392B")
+        set_status("找不到符合的車輛，請換個關鍵字試試","#C0392B")
+    else:
+        ui(pages_label.config,text="查詢失敗",foreground="#C0392B")
+        set_status("Chrome 啟動失敗，請確認電腦已安裝 Google Chrome","#C0392B")
+    set_busy(False)
+
+
+# 步驟2：爬取資料
+def search_car_thread():
+    try:
+        start,end=int(start_var.get()),int(end_var.get())
+    except ValueError:
+        messagebox.showwarning("提醒","頁數請輸入數字")
+        return
+    total=pages_var.get()
+    if not 1<=start<=end<=total:
+        messagebox.showwarning("提醒",f"頁數範圍需介於 1 ~ {total}，且起始頁不能大於結束頁")
+        return
+    Thread(target=search_car,args=(start,end),daemon=True).start()
+
+
+def search_car(start,end):
+    global save_path
+    set_busy(True)
+    ui(open_button.config,state=tk.DISABLED)
+    page_count=end-start+1
+    ui(progress.config,maximum=page_count,value=0)
+    set_status(f"正在爬取第 {start} ~ {end} 頁（0/{page_count}）...")
+
+    datas=[]
+    done=0
+    #多執行緒爬取各頁資料
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures=[pool.submit(get_car_data,cars,i) for i in range(start,end+1)]
+        for future in as_completed(futures):
+            done+=1
+            try:
+                datas+=future.result()
+            except Exception as e:
+                print("爬取失敗:",e)
+            ui(progress.config,value=done)
+            set_status(f"正在爬取第 {start} ~ {end} 頁（{done}/{page_count}），已取得 {len(datas)} 筆")
+
+    if not datas:
+        set_status("沒有抓到任何資料，請換個關鍵字或稍後再試","#C0392B")
+        set_busy(False)
+        return
+
+    df=pd.DataFrame(datas,columns=COLUMNS)
+    #去除重複車輛
+    df=df.drop_duplicates(subset="超連結").set_index("標題")
+    save_path=os.path.join(SAVE_DIR,f"8891_{cars}.csv")
+    try:
+        df.to_csv(save_path,encoding="utf-8-sig")
+    except PermissionError:
+        set_status("存檔失敗：CSV 檔案正被 Excel 開啟，請關閉後再試一次","#C0392B")
+        set_busy(False)
+        return
+
+    set_status(f"完成！共 {len(df)} 筆，已存到：\n{save_path}","#1E7E34")
+    ui(open_button.config,state=tk.NORMAL)
+    set_busy(False)
+
+
+def open_file():
+    if not (save_path and os.path.exists(save_path)):
+        return
+    #用系統預設程式開啟CSV
+    if sys.platform=="win32":
+        os.startfile(save_path)
+    elif sys.platform=="darwin":
+        subprocess.run(["open",save_path])
+    else:
+        subprocess.run(["xdg-open",save_path])
+
+
+# 介面
 car=tk.Tk()
+car.title("8891中古車爬蟲 v0.2")
+car.geometry("440x500")
+car.resizable(False,False)
 
-car.title("8891爬蟲app v0.1")
-car.geometry("300x400")
+style=ttk.Style()
+style.configure("TLabel",font=(FONT,11))
+style.configure("TButton",font=(FONT,11),padding=4)
+style.configure("TLabelframe.Label",font=(FONT,11,"bold"))
+style.configure("Accent.TButton",font=(FONT,12,"bold"),padding=6)
 
-label=tk.Label(car,text="8891爬蟲GUI",font=("標楷體",24),fg="blue")
-label.pack(pady=12)
+pages_var=tk.IntVar(value=0)
+start_var=tk.StringVar(value="1")
+end_var=tk.StringVar(value="1")
 
-label1=tk.Label(car,text="關鍵字",font=("標楷體",16))
-label1.pack()
+tk.Label(car,text="8891 中古車爬蟲",font=(FONT,20,"bold"),fg="#1F5FAD").pack(pady=(14,0))
+ttk.Label(car,text="輸入車款 → 查詢頁數 → 選擇範圍 → 開始爬取，結果會存成 CSV",
+          foreground="#666666",font=(FONT,9)).pack(pady=(2,10))
 
-entry=tk.Entry(car,font=("標楷體",14),justify="center")
-entry.pack()
+#步驟1
+step1=ttk.LabelFrame(car,text=" 步驟 1：輸入車款關鍵字 ",padding=10)
+step1.pack(fill="x",padx=16,pady=4)
+keyword_entry=ttk.Entry(step1,font=(FONT,12))
+keyword_entry.pack(side="left",fill="x",expand=True,padx=(0,8))
+keyword_entry.bind("<Return>",search_pages_thread) #按Enter查詢頁數
+keyword_entry.focus()
+search_button=ttk.Button(step1,text="查詢頁數",command=search_pages_thread)
+search_button.pack(side="right")
 
-button=tk.Button(car,text="查找總頁數",font=("標楷體",16),command=search_pages_thread)
-button.pack(pady=6)
+pages_label=ttk.Label(car,text="尚未查詢",foreground="#888888")
+pages_label.pack(pady=4)
 
-label2=tk.Label(car,text="尚未查找",font=("標楷體",16))
-label2.pack()
+#步驟2
+step2=ttk.LabelFrame(car,text=" 步驟 2：選擇要爬取的頁數範圍 ",padding=10)
+step2.pack(fill="x",padx=16,pady=4)
+range_row=ttk.Frame(step2)
+range_row.pack()
+ttk.Label(range_row,text="從第").pack(side="left")
+start_spin=ttk.Spinbox(range_row,from_=1,to=1,width=5,textvariable=start_var,
+                       justify="center",font=(FONT,11))
+start_spin.pack(side="left",padx=4)
+ttk.Label(range_row,text="頁　到第").pack(side="left")
+end_spin=ttk.Spinbox(range_row,from_=1,to=1,width=5,textvariable=end_var,
+                     justify="center",font=(FONT,11))
+end_spin.pack(side="left",padx=4)
+ttk.Label(range_row,text="頁").pack(side="left")
 
-label3=tk.Label(car,text="",font=("標楷體",16),bg="#02F78E")
-label3.pack(padx=9,pady=9,expand=1,fill="both")
+#步驟3
+step3=ttk.LabelFrame(car,text=" 步驟 3：開始爬取 ",padding=10)
+step3.pack(fill="x",padx=16,pady=4)
+start_button=ttk.Button(step3,text="開始爬取",style="Accent.TButton",
+                        command=search_car_thread,state=tk.DISABLED)
+start_button.pack(fill="x")
+progress=ttk.Progressbar(step3,mode="determinate")
+progress.pack(fill="x",pady=(10,0))
 
-button1=tk.Button(car,text="開始",font=("標楷體",16),command=search_car_thread,fg="red")
-button1.pack(side="bottom",pady=6)
+status_label=ttk.Label(car,text="請先輸入關鍵字並查詢頁數",wraplength=400,justify="center")
+status_label.pack(pady=10)
 
-entry1=tk.Entry(car,font=("標楷體",14),width=5,justify="center")
-entry1.pack(side="left",pady=3,padx=3,fill="x",expand=1)
-
-entry2=tk.Entry(car,font=("標楷體",14),width=5,justify="center")
-entry2.pack(side="right",pady=3,padx=3,fill="x",expand=1)
-
-
-
-button1.config(state=tk.DISABLED)  #預設按鈕為關閉狀態
-
-
-
+open_button=ttk.Button(car,text="開啟 CSV 檔案",command=open_file,state=tk.DISABLED)
+open_button.pack()
 
 car.mainloop()

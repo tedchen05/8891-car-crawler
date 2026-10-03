@@ -3,86 +3,107 @@
 Created on Sun Aug 11 14:51:39 2024
 
 @author: USER
+
+8891中古車爬蟲核心功能
 """
-# from tools import get_chrome #,get_soup
+import re
+from urllib.parse import quote
+
 from bs4 import BeautifulSoup
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-#import pandas as pd
-import time
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
-def get_chrome(url,path=None,hide=False):
-    #path為None時，由Selenium自動下載對應版本的chromedriver
-    service=Service(path)
-    options=webdriver.ChromeOptions()
+SEARCH_URL = "https://auto.8891.com.tw/?key={}&page={}"
+# CSV欄位名稱
+COLUMNS = ["標題", "縣市", "價格", "里程", "年份", "圖片連結", "超連結", "內文"]
+# 從網頁內嵌資料取出照片網址與車輛編號
+IMAGE_PATTERN = re.compile(r'\\"image\\":\\"([^"\\]+)\\"[^{}]*?\\"itemId\\":(\d+)')
+
+
+def build_url(keyword, page=1):
+    # 組出搜尋網址(關鍵字轉為網址編碼)
+    return SEARCH_URL.format(quote(keyword), page)
+
+
+def get_chrome(url, hide=True, timeout=15):
+    # 開啟Chrome並載入網頁
+    options = webdriver.ChromeOptions()
     if hide:
-        options.add_argument("--headless=new") #不顯示瀏覽器視窗
+        options.add_argument("--headless=new")  # 背景執行，不顯示視窗
+    options.add_argument("--blink-settings=imagesEnabled=false")  # 不載入圖片
+    options.add_argument("--log-level=3")
+    chrome = webdriver.Chrome(options=options)
     try:
-        chrome=webdriver.Chrome(service=service,options=options)
         chrome.get(url)
-        return chrome
-    except Exception as e:
-        print(e)
-    return None
-
-# 最大頁數
-def get_car_pages(url):
-    chrome=get_chrome(url)
-    time.sleep(1)
-    pages=None
-    if chrome is not None:        
-        soup=BeautifulSoup(chrome.page_source,"lxml")
-        items=soup.select("li.ant-pagination-item")
-        pages=int(items[-1].text.strip()) if items else 1
-        chrome.quit()
-        
-    return pages
+        # 等待車輛列表或頁碼載入
+        WebDriverWait(chrome, timeout).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'a[class*="row-item"], li.ant-pagination-item')
+            )
+        )
+    except Exception:
+        pass  # 查無結果時不再等待
+    return chrome
 
 
-
-# 取得每頁資料
-def get_car_data(url,q):
-    chrome=get_chrome(url,hide=True)
-    
-    datas=[]
-    time.sleep(1)
-    if chrome is not None:
-        soup=BeautifulSoup(chrome.page_source,"lxml")
-        cars=soup.select('a[class*="row-item"]')
-        for car in cars:
-            title=car.select_one('[class*="ib-info-title"]').text.strip()
-            content=car.select_one('[class*="ib-info-oldtitle"]').text.strip()
-            price=car.select_one('[class*="ib-price"]').text.strip()
-            icons=car.select('[class*="ib-icon"]')
-            year,km=icons[0].text.strip(),icons[1].text.strip()
-            county=car.select_one('[class*="ib-ii-item"]').text.strip()
-            car_url="https://auto.8891.com.tw"+car.get("href")
-            img=car.select_one('[class*="ib-image"] img') #圖片為延遲載入，未載入時為空
-            image_url=img.get("data-src") if img else ""
-            #print(title,county,content,price,year,km,car_url,image_url,sep="\n")
-            #順序對應GUI的欄位:標題,縣市,價格,里程,年份,圖片連結,超連結,內文
-            datas.append([title,county,price,km,year,image_url,car_url,content])
-            #print("-"*80)   
-        chrome.quit()
-    else:
-        print("chrome啟動失敗")
-
-    q.put(datas)
-    return datas    
+def get_page_source(url):
+    chrome = get_chrome(url)
+    try:
+        return chrome.page_source
+    finally:
+        chrome.quit()  # 關閉瀏覽器
 
 
+# 取得總頁數，查無資料回傳0
+def get_car_pages(keyword):
+    soup = BeautifulSoup(get_page_source(build_url(keyword)), "lxml")
+    if not soup.select('a[class*="row-item"]'):
+        return 0
+    # 頁碼列表的最後一個數字為總頁數
+    items = soup.select("li.ant-pagination-item")
+    return int(items[-1].text.strip()) if items else 1
 
-if __name__=="__main__":
-    key="jimny"    
-    url=f"https://auto.8891.com.tw/?key={key}"
-    pages=get_car_pages(url)
-    print(pages)
-    datas=get_car_data(url)
-    print(datas)
-    
-    
-    
-    
-    
-    
-    
+
+def text_of(tag, selector):
+    found = tag.select_one(selector)
+    return found.text.strip() if found else ""
+
+
+# 取得單頁所有車輛資料
+def get_car_data(keyword, page):
+    html = get_page_source(build_url(keyword, page))
+    soup = BeautifulSoup(html, "lxml")
+    # 車輛編號對應照片網址
+    images = {item_id: img for img, item_id in IMAGE_PATTERN.findall(html)}
+
+    datas = []
+    # 逐一解析每台車
+    for car in soup.select('a[class*="row-item"]'):
+        try:
+            icons = car.select('[class*="ib-icon"]')
+            item = car.select_one("[data-id]")
+            item_id = item.get("data-id") if item else ""
+            datas.append([
+                text_of(car, '[class*="ib-info-title"]'),
+                text_of(car, '[class*="ib-ii-item"]'),
+                text_of(car, '[class*="ib-price"]'),
+                icons[1].text.strip() if len(icons) > 1 else "",
+                icons[0].text.strip() if icons else "",
+                images.get(item_id, ""),
+                # 車輛網址(去除追蹤參數)
+                "https://auto.8891.com.tw" + car.get("href").split("?")[0],
+                text_of(car, '[class*="ib-info-oldtitle"]'),
+            ])
+        except Exception as e:
+            print("略過一筆資料:", e)  # 略過格式不符的車輛
+
+    return datas
+
+
+if __name__ == "__main__":
+    key = "jimny"
+    print("總頁數:", get_car_pages(key))
+    for row in get_car_data(key, 1)[:3]:
+        print(dict(zip(COLUMNS, row)))
